@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+  <munit:config name="consumer-resilience-test-suite.xml"/>
+
+  <!-- Fixture shared by all tests: the pieces the consumer has already set before it looks up the customer -->
+  <munit:before-test name="fixtures">
+    <set-variable variableName="envelope" value="#[{ event: { customer: { customerId: 'C-1' } } }]"/>
+    <set-variable variableName="eventId" value="T-9"/>
+    <set-variable variableName="corrId" value="c-1"/>
+  </munit:before-test>
+
+  <!-- DB down: the lookup must FAIL LOUDLY after its retries (MULE:RETRY_EXHAUSTED).
+       The consumer's error handler matches exactly this error type and puts the event back on its queue,
+       so the event is never lost and never acknowledged as processed. -->
+  <munit:test name="db-down-error-propagates-so-event-is-requeued" expectedErrorType="MULE:RETRY_EXHAUSTED">
+    <munit:behavior>
+      <munit-tools:mock-when processor="db:select">
+        <munit-tools:then-return><munit-tools:error typeId="DB:CONNECTIVITY"/></munit-tools:then-return>
+      </munit-tools:mock-when>
+    </munit:behavior>
+    <munit:execution>
+      <flow-ref name="enrich-customer-profile-sf"/>
+    </munit:execution>
+  </munit:test>
+
+  <!-- Unknown customer: event is NOT rejected; a default STANDARD profile is applied and the gap is flagged -->
+  <munit:test name="unknown-customer-gets-default-profile-and-is-flagged">
+    <munit:behavior>
+      <munit-tools:mock-when processor="db:select">
+        <munit-tools:then-return><munit-tools:payload value="#[[]]"/></munit-tools:then-return>
+      </munit-tools:mock-when>
+    </munit:behavior>
+    <munit:execution>
+      <flow-ref name="enrich-customer-profile-sf"/>
+    </munit:execution>
+    <munit:validation>
+      <munit-tools:assert-that expression="#[vars.profile.riskProfile]" is="#[MunitTools::equalTo('STANDARD')]"/>
+      <munit-tools:assert-that expression="#[vars.enrichmentIncomplete]" is="#[MunitTools::equalTo(true)]"/>
+    </munit:validation>
+  </munit:test>
+
+  <!-- Known customer: the stored profile is used and nothing is flagged -->
+  <munit:test name="known-customer-uses-stored-profile">
+    <munit:behavior>
+      <munit-tools:mock-when processor="db:select">
+        <munit-tools:then-return><munit-tools:payload value="#[[{ customer_id: 'C-1', risk_profile: 'PREMIUM', usual_hour_start: 8, usual_hour_end: 20 }]]"/></munit-tools:then-return>
+      </munit-tools:mock-when>
+      <set-variable variableName="profileRows" value="#[[{ customer_id: 'C-1', risk_profile: 'PREMIUM', usual_hour_start: 8, usual_hour_end: 20 }]]"/>
+    </munit:behavior>
+    <munit:execution>
+      <flow-ref name="enrich-customer-profile-sf"/>
+    </munit:execution>
+    <munit:validation>
+      <munit-tools:assert-that expression="#[vars.profile.riskProfile]" is="#[MunitTools::equalTo('PREMIUM')]"/>
+      <munit-tools:assert-that expression="#[vars.profile.usualHourStart]" is="#[MunitTools::equalTo(8)]"/>
+      <munit-tools:assert-that expression="#[vars.enrichmentIncomplete]" is="#[MunitTools::equalTo(false)]"/>
+    </munit:validation>
+  </munit:test>
+</mule>
